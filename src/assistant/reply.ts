@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { traceLlm } from "pendo-server-sdk";
 import type { Account, IncomingChatMessage, Trip, User } from "../types.js";
 
 /** The model the Tripwise Assistant answers with. */
@@ -6,6 +7,14 @@ export const ASSISTANT_MODEL = "claude-opus-5-5";
 
 // The SDK reads the key from the ANTHROPIC_API_KEY environment variable.
 const anthropic = new Anthropic();
+
+// Pendo's auto-patch reaches only the CommonJS build of @anthropic-ai/sdk, and this ES module project loads
+// its ES module build, so the model call is traced here. Pendo records `prompt` as the turn's prompt.
+const createTracedMessage = traceLlm(
+  "anthropic.messages.create",
+  (request: { prompt: string; body: Anthropic.MessageCreateParamsNonStreaming }) =>
+    anthropic.messages.create(request.body),
+);
 
 /** The assistant's instructions, with what it knows about the signed-in user and their upcoming trips. */
 function systemPrompt(user: User, account: Account, upcomingTrips: Trip[]): string {
@@ -31,11 +40,14 @@ export async function writeAssistantReply(
   messages: IncomingChatMessage[],
   context: { user: User; account: Account; upcomingTrips: Trip[] },
 ): Promise<string> {
-  const response = await anthropic.messages.create({
-    model: ASSISTANT_MODEL,
-    max_tokens: 2000,
-    system: systemPrompt(context.user, context.account, context.upcomingTrips),
-    messages: messages.map(({ role, content }) => ({ role, content })),
+  const response = await createTracedMessage({
+    prompt: [...messages].reverse().find((message) => message.role === "user")?.content ?? "",
+    body: {
+      model: ASSISTANT_MODEL,
+      max_tokens: 2000,
+      system: systemPrompt(context.user, context.account, context.upcomingTrips),
+      messages: messages.map(({ role, content }) => ({ role, content })),
+    },
   });
   if (response.stop_reason === "refusal") {
     return "Sorry, I can't help with that one. Ask me about another part of your trip.";
